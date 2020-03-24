@@ -14,10 +14,16 @@
 #include "blosc-comp-features.h"
 #include <stdio.h>
 
+#if defined(USING_CMAKE)
+  #include "config.h"
+#endif /*  USING_CMAKE */
+
+#ifdef HAVE_THREADS
 #if defined(_WIN32)
 #include "win32/pthread.h"
 #else
 #include <pthread.h>
+#endif
 #endif
 
 /* Visual Studio < 2013 does not have stdbool.h so here it is a replacement: */
@@ -351,8 +357,10 @@ static shuffle_implementation_t get_shuffle_implementation(void) {
 }
 
 
+#ifdef HAVE_THREADS
 /*  Flag indicating whether the implementation has been initialized. */
 static pthread_once_t implementation_initialized = PTHREAD_ONCE_INIT;
+#endif
 
 /*  The dynamically-chosen shuffle/unshuffle implementation.
     This is only safe to use once `implementation_initialized` is set. */
@@ -361,6 +369,7 @@ static shuffle_implementation_t host_implementation;
 static void set_host_implementation(void) {
   host_implementation = get_shuffle_implementation();
 }
+
 
 /*  Initialize the shuffle implementation, if necessary. */
 #if defined(__GNUC__) || defined(__clang__)
@@ -372,9 +381,15 @@ __forceinline
 #else
 BLOSC_INLINE
 #endif
+#ifdef HAVE_THREADS
 void init_shuffle_implementation(void) {
   pthread_once(&implementation_initialized, &set_host_implementation);
 }
+#else
+void init_shuffle_implementation(void) {
+  set_host_implementation();
+}
+#endif
 
 /*  Shuffle a block by dynamically dispatching to the appropriate
     hardware-accelerated routine at run-time. */
