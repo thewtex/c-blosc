@@ -56,12 +56,14 @@
   #include <inttypes.h>
 #endif  /* _WIN32 */
 
+#ifdef HAVE_THREADS
 /* Include the win32/pthread.h library for all the Windows builds. See #224. */
 #if defined(_WIN32)
   #include "win32/pthread.h"
   #include "win32/pthread.c"
 #else
   #include <pthread.h>
+#endif
 #endif
 
 
@@ -112,8 +114,9 @@ struct blosc_context {
   int32_t numthreads;
   int32_t threads_started;
   int32_t end_threads;
-  pthread_t threads[BLOSC_MAX_THREADS];
   int32_t tids[BLOSC_MAX_THREADS];
+  #ifdef HAVE_THREADS
+  pthread_t threads[BLOSC_MAX_THREADS];
   pthread_mutex_t count_mutex;
   #ifdef _POSIX_BARRIERS_MINE
   pthread_barrier_t barr_init;
@@ -126,6 +129,7 @@ struct blosc_context {
   #if !defined(_WIN32)
   pthread_attr_t ct_attr;            /* creation time attrs for threads */
   #endif
+  #endif // HAVE_THREADS
   int32_t thread_giveup_code;               /* error code when give up */
   int32_t thread_nblock;                    /* block counter */
 };
@@ -141,7 +145,9 @@ struct thread_context {
 
 /* Global context for non-contextual API */
 static struct blosc_context* g_global_context;
+#ifdef HAVE_THREADS
 static pthread_mutex_t* global_comp_mutex;
+#endif
 static int32_t g_compressor = BLOSC_BLOSCLZ;  /* the compressor to use by default */
 static int32_t g_threads = 1;
 static int32_t g_force_blocksize = 0;
@@ -886,11 +892,13 @@ static int parallel_blosc(struct blosc_context* context)
   context->thread_giveup_code = 1;
   context->thread_nblock = -1;
 
+#ifdef HAVE_THREADS
   /* Synchronization point for all threads (wait for initialization) */
   WAIT_INIT(-1, context);
 
   /* Synchronization point for all threads (wait for finalization) */
   WAIT_FINISH(-1, context);
+#endif
 
   if (context->thread_giveup_code > 0) {
     /* Return the total bytes (de-)compressed in threads */
@@ -1388,7 +1396,9 @@ int blosc_compress(int clevel, int doshuffle, size_t typesize, size_t nbytes,
     return result;
   }
 
+#ifdef HAVE_THREADS
   pthread_mutex_lock(global_comp_mutex);
+#endif
 
   do {
     result = initialize_context_compression(g_global_context, clevel, doshuffle,
@@ -1403,7 +1413,9 @@ int blosc_compress(int clevel, int doshuffle, size_t typesize, size_t nbytes,
     result = blosc_compress_context(g_global_context);
   } while (0);
 
+#ifdef HAVE_THREADS
   pthread_mutex_unlock(global_comp_mutex);
+#endif
 
   return result;
 }
@@ -1554,12 +1566,16 @@ static int blosc_decompress_impl(const void* src, void* dest,
     return result;
   }
 
+#ifdef HAVE_THREADS
   pthread_mutex_lock(global_comp_mutex);
+#endif
 
   result = blosc_run_decompression_with_context(g_global_context, src, dest,
                                                 destsize, g_threads, unsafe);
 
+#ifdef HAVE_THREADS
   pthread_mutex_unlock(global_comp_mutex);
+#endif
 
   return result;
 }
@@ -1748,8 +1764,10 @@ static void *t_blosc(void *ctxt)
 
   while(1)
   {
+#ifdef HAVE_THREADS
     /* Synchronization point for all threads (wait for initialization) */
     WAIT_INIT(NULL, context->parent_context);
+#endif
 
     if(context->parent_context->end_threads)
     {
@@ -1784,10 +1802,14 @@ static void *t_blosc(void *ctxt)
 
     if (compress && !(flags & BLOSC_MEMCPYED)) {
       /* Compression always has to follow the block order */
+#ifdef HAVE_THREADS
       pthread_mutex_lock(&context->parent_context->count_mutex);
+#endif
       context->parent_context->thread_nblock++;
       nblock_ = context->parent_context->thread_nblock;
+#ifdef HAVE_THREADS
       pthread_mutex_unlock(&context->parent_context->count_mutex);
+#endif
       tblock = nblocks;
     }
     else {
@@ -1850,26 +1872,37 @@ static void *t_blosc(void *ctxt)
       /* Check results for the compressed/decompressed block */
       if (cbytes < 0) {            /* compr/decompr failure */
         /* Set giveup_code error */
+#ifdef HAVE_THREADS
         pthread_mutex_lock(&context->parent_context->count_mutex);
+#endif
         context->parent_context->thread_giveup_code = cbytes;
+#ifdef HAVE_THREADS
         pthread_mutex_unlock(&context->parent_context->count_mutex);
+#endif
+        context->parent_context->thread_giveup_code = cbytes;
         break;
       }
 
       if (compress && !(flags & BLOSC_MEMCPYED)) {
         /* Start critical section */
+#ifdef HAVE_THREADS
         pthread_mutex_lock(&context->parent_context->count_mutex);
+#endif
         ntdest = context->parent_context->num_output_bytes;
         _sw32(bstarts + nblock_ * 4, ntdest); /* update block start counter */
         if ( (cbytes == 0) || (ntdest+cbytes > maxbytes) ) {
           context->parent_context->thread_giveup_code = 0;  /* uncompressible buffer */
+#ifdef HAVE_THREADS
           pthread_mutex_unlock(&context->parent_context->count_mutex);
+#endif
           break;
         }
         context->parent_context->thread_nblock++;
         nblock_ = context->parent_context->thread_nblock;
         context->parent_context->num_output_bytes += cbytes;           /* update return bytes counter */
+#ifdef HAVE_THREADS
         pthread_mutex_unlock(&context->parent_context->count_mutex);
+#endif
         /* End of critical section */
 
         /* Copy the compressed buffer to destination */
@@ -1886,13 +1919,19 @@ static void *t_blosc(void *ctxt)
     /* Sum up all the bytes decompressed */
     if ((!compress || (flags & BLOSC_MEMCPYED)) && context->parent_context->thread_giveup_code > 0) {
       /* Update global counter for all threads (decompression only) */
+#ifdef HAVE_THREADS
       pthread_mutex_lock(&context->parent_context->count_mutex);
+#endif
       context->parent_context->num_output_bytes += ntbytes;
+#ifdef HAVE_THREADS
       pthread_mutex_unlock(&context->parent_context->count_mutex);
+#endif
     }
 
+#ifdef HAVE_THREADS
     /* Meeting point for all threads (wait for finalization) */
     WAIT_FINISH(NULL, context->parent_context);
+#endif
   }
 
   /* Cleanup our working space and context */
@@ -1910,13 +1949,16 @@ static int init_threads(struct blosc_context* context)
   int32_t ebsize;
   struct thread_context* thread_context;
 
+#ifdef HAVE_THREADS
   /* Initialize mutex and condition variable objects */
   pthread_mutex_init(&context->count_mutex, NULL);
+#endif
 
   /* Set context thread sentinels */
   context->thread_giveup_code = 1;
   context->thread_nblock = -1;
 
+#ifdef HAVE_THREADS
   /* Barrier initialization */
 #ifdef _POSIX_BARRIERS_MINE
   pthread_barrier_init(&context->barr_init, NULL, context->numthreads+1);
@@ -1932,6 +1974,7 @@ static int init_threads(struct blosc_context* context)
   pthread_attr_init(&context->ct_attr);
   pthread_attr_setdetachstate(&context->ct_attr, PTHREAD_CREATE_JOINABLE);
 #endif
+#endif // HAVE_THREADS
 
   /* Finally, create the threads in detached state */
   for (tid = 0; tid < context->numthreads; tid++) {
@@ -1948,10 +1991,14 @@ static int init_threads(struct blosc_context* context)
     thread_context->tmp3 = thread_context->tmp + context->blocksize + ebsize;
     thread_context->tmpblocksize = context->blocksize;
 
+#ifdef HAVE_THREADS
 #if !defined(_WIN32)
     rc2 = pthread_create(&context->threads[tid], &context->ct_attr, t_blosc, (void *)thread_context);
 #else
     rc2 = pthread_create(&context->threads[tid], NULL, t_blosc, (void *)thread_context);
+#endif
+#else
+    rc2 = 0;
 #endif
     if (rc2) {
       fprintf(stderr, "ERROR; return code from pthread_create() is %d\n", rc2);
@@ -2226,8 +2273,10 @@ void blosc_atfork_child(void) {
 
   g_initlib = 0;
 
+#ifdef HAVE_THREADS
   my_free(global_comp_mutex);
   global_comp_mutex = NULL;
+#endif
 
   my_free(g_global_context);
   g_global_context = NULL;
@@ -2239,12 +2288,15 @@ void blosc_init(void)
   /* Return if we are already initialized */
   if (g_initlib) return;
 
+#ifdef HAVE_THREADS
   global_comp_mutex = (pthread_mutex_t*)my_malloc(sizeof(pthread_mutex_t));
   pthread_mutex_init(global_comp_mutex, NULL);
+#endif
 
   g_global_context = (struct blosc_context*)my_malloc(sizeof(struct blosc_context));
   g_global_context->threads_started = 0;
 
+#ifdef HAVE_THREADS
   #if !defined(_WIN32)
   /* atfork handlers are only be registered once, though multiple re-inits may
    * occur via blosc_destroy/blosc_init.  */
@@ -2253,6 +2305,7 @@ void blosc_init(void)
     pthread_atfork(NULL, NULL, &blosc_atfork_child);
   }
   #endif
+#endif
 
   g_initlib = 1;
 }
@@ -2264,13 +2317,17 @@ void blosc_destroy(void)
 
   g_initlib = 0;
 
+#ifdef HAVE_THREADS
   blosc_release_threadpool(g_global_context);
+#endif
   my_free(g_global_context);
   g_global_context = NULL;
 
+#ifdef HAVE_THREADS
   pthread_mutex_destroy(global_comp_mutex);
   my_free(global_comp_mutex);
   global_comp_mutex = NULL;
+#endif
 }
 
 int blosc_release_threadpool(struct blosc_context* context)
@@ -2281,6 +2338,7 @@ int blosc_release_threadpool(struct blosc_context* context)
   int rc2;
   (void)rc;  // just to avoid 'unused-variable' warning
 
+#ifdef HAVE_THREADS
   if (context->threads_started > 0)
   {
     /* Tell all existing threads to finish */
@@ -2316,6 +2374,7 @@ int blosc_release_threadpool(struct blosc_context* context)
   #endif
 
   }
+#endif
 
   context->threads_started = 0;
 

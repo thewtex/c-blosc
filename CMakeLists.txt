@@ -174,6 +174,9 @@ if (NOT DEACTIVATE_ZSTD)
     set(HAVE_ZSTD TRUE)
 endif (NOT DEACTIVATE_ZSTD)
 
+find_package(Threads)
+set(HAVE_THREADS ${Threads_FOUND} CACHE BOOL "Whether we have threads to use.")
+
 # create the config.h file
 configure_file ("blosc/config.h.in"  "blosc/config.h" )
 
